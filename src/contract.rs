@@ -7,27 +7,26 @@ declare_id!("your_program_id");
 pub mod points_token {
     use super::*;
 
-    // 初始化代币
     pub fn initialize(
         ctx: Context<Initialize>,
         name: String,
         symbol: String,
         decimals: u8,
+        default_conversion_rate: u64,
     ) -> Result<()> {
         let token_info = &mut ctx.accounts.token_info;
         token_info.name = name;
         token_info.symbol = symbol;
         token_info.decimals = decimals;
         token_info.authority = ctx.accounts.authority.key();
+        token_info.default_conversion_rate = default_conversion_rate;
         Ok(())
     }
 
-    // 铸造代币
     pub fn mint_token(
         ctx: Context<MintToken>,
         amount: u64,
     ) -> Result<()> {
-        // 只有管理员可以铸造代币
         require!(
             ctx.accounts.token_info.authority == ctx.accounts.authority.key(),
             ErrorCode::Unauthorized
@@ -46,25 +45,62 @@ pub mod points_token {
         Ok(())
     }
 
-    // 积分转换为代币
+    pub fn update_default_conversion_rate(
+        ctx: Context<UpdateDefaultRate>,
+        new_rate: u64,
+    ) -> Result<()> {
+        require!(
+            ctx.accounts.token_info.authority == ctx.accounts.authority.key(),
+            ErrorCode::Unauthorized
+        );
+        
+        require!(new_rate > 0, ErrorCode::InvalidConversionRate);
+        
+        ctx.accounts.token_info.default_conversion_rate = new_rate;
+        Ok(())
+    }
+    
+    pub fn set_custom_conversion_rate(
+        ctx: Context<SetCustomRate>,
+        custom_rate: u64,
+    ) -> Result<()> {
+        require!(
+            ctx.accounts.token_info.authority == ctx.accounts.authority.key(),
+            ErrorCode::Unauthorized
+        );
+        
+        require!(custom_rate > 0, ErrorCode::InvalidConversionRate);
+        
+        let custom_rate_account = &mut ctx.accounts.custom_rate;
+        custom_rate_account.user = ctx.accounts.user_account.key();
+        custom_rate_account.conversion_rate = custom_rate;
+        Ok(())
+    }
+
     pub fn convert_points(
         ctx: Context<ConvertPoints>,
         points_amount: u64,
     ) -> Result<()> {
-        // 设置积分和代币的转换比率 (例如 10:1)
-        let conversion_rate: u64 = 10;
+        let conversion_rate = if ctx.accounts.custom_rate.is_some() {
+            let custom_rate = ctx.accounts.custom_rate.as_ref().unwrap();
+            require!(
+                custom_rate.user == ctx.accounts.user_points.owner,
+                ErrorCode::InvalidCustomRateAccount
+            );
+            custom_rate.conversion_rate
+        } else {
+            ctx.accounts.token_info.default_conversion_rate
+        };
+        
         let token_amount = points_amount / conversion_rate;
 
-        // 检查用户积分余额
         require!(
             ctx.accounts.user_points.amount >= points_amount,
             ErrorCode::InsufficientPoints
         );
 
-        // 扣除积分
         ctx.accounts.user_points.amount -= points_amount;
 
-        // 铸造对应数量的代币
         let cpi_accounts = token::MintTo {
             mint: ctx.accounts.mint.to_account_info(),
             to: ctx.accounts.token_account.to_account_info(),
@@ -77,11 +113,37 @@ pub mod points_token {
         token::mint_to(cpi_ctx, token_amount)?;
         Ok(())
     }
+
+    pub fn batch_set_custom_rates(
+        ctx: Context<BatchSetCustomRates>,
+        user_rates: Vec<(Pubkey, u64)>,
+    ) -> Result<()> {
+        require!(
+            ctx.accounts.token_info.authority == ctx.accounts.authority.key(),
+            ErrorCode::Unauthorized
+        );
+        
+        require!(
+            user_rates.len() <= 10,
+            ErrorCode::BatchTooLarge
+        );
+        
+        ctx.accounts.batch_rates.authority = ctx.accounts.authority.key();
+        ctx.accounts.batch_rates.user_rates = user_rates
+            .into_iter()
+            .map(|(user, rate)| {
+                require!(rate > 0, ErrorCode::InvalidConversionRate);
+                UserRate { user, rate }
+            })
+            .collect();
+        
+        Ok(())
+    }
 }
 
 #[derive(Accounts)]
 pub struct Initialize<'info> {
-    #[account(init, payer = authority, space = 8 + 32 + 32 + 32 + 1)]
+    #[account(init, payer = authority, space = 8 + 32 + 32 + 32 + 1 + 8)]
     pub token_info: Account<'info, TokenInfo>,
     #[account(mut)]
     pub authority: Signer<'info>,
@@ -101,6 +163,44 @@ pub struct MintToken<'info> {
 }
 
 #[derive(Accounts)]
+pub struct UpdateDefaultRate<'info> {
+    #[account(mut)]
+    pub token_info: Account<'info, TokenInfo>,
+    pub authority: Signer<'info>,
+}
+
+#[derive(Accounts)]
+pub struct SetCustomRate<'info> {
+    pub token_info: Account<'info, TokenInfo>,
+    #[account(
+        init_if_needed,
+        payer = authority,
+        space = 8 + 32 + 8,
+        seeds = [b"custom_rate", user_account.key().as_ref()],
+        bump
+    )]
+    pub custom_rate: Account<'info, CustomConversionRate>,
+    pub user_account: AccountInfo<'info>,
+    #[account(mut)]
+    pub authority: Signer<'info>,
+    pub system_program: Program<'info, System>,
+}
+
+#[derive(Accounts)]
+pub struct BatchSetCustomRates<'info> {
+    pub token_info: Account<'info, TokenInfo>,
+    #[account(
+        init_if_needed, 
+        payer = authority, 
+        space = 8 + 32 + 4 + (10 * (32 + 8))
+    )]
+    pub batch_rates: Account<'info, BatchConversionRates>,
+    #[account(mut)]
+    pub authority: Signer<'info>,
+    pub system_program: Program<'info, System>,
+}
+
+#[derive(Accounts)]
 pub struct ConvertPoints<'info> {
     #[account(mut)]
     pub token_info: Account<'info, TokenInfo>,
@@ -110,6 +210,14 @@ pub struct ConvertPoints<'info> {
     pub token_account: Account<'info, TokenAccount>,
     #[account(mut)]
     pub user_points: Account<'info, UserPoints>,
+    #[account(
+        mut,
+        seeds = [b"custom_rate", user_points.owner.as_ref()],
+        bump,
+        constraint = custom_rate.user == user_points.owner @ ErrorCode::InvalidCustomRateAccount,
+        constraint = custom_rate.is_initialized @ ErrorCode::CustomRateNotInitialized,
+    )]
+    pub custom_rate: Option<Account<'info, CustomConversionRate>>,
     pub authority: Signer<'info>,
     pub token_program: Program<'info, Token>,
 }
@@ -120,6 +228,7 @@ pub struct TokenInfo {
     pub symbol: String,
     pub decimals: u8,
     pub authority: Pubkey,
+    pub default_conversion_rate: u64,
 }
 
 #[account]
@@ -128,10 +237,38 @@ pub struct UserPoints {
     pub amount: u64,
 }
 
+#[account]
+#[derive(Default)]
+pub struct CustomConversionRate {
+    pub user: Pubkey,
+    pub conversion_rate: u64,
+    pub is_initialized: bool,
+}
+
+#[derive(AnchorSerialize, AnchorDeserialize, Clone)]
+pub struct UserRate {
+    pub user: Pubkey,
+    pub rate: u64,
+}
+
+#[account]
+pub struct BatchConversionRates {
+    pub authority: Pubkey,
+    pub user_rates: Vec<UserRate>,
+}
+
 #[error_code]
 pub enum ErrorCode {
     #[msg("Unauthorized")]
     Unauthorized,
     #[msg("Insufficient points balance")]
     InsufficientPoints,
+    #[msg("Invalid conversion rate")]
+    InvalidConversionRate,
+    #[msg("Invalid custom rate account")]
+    InvalidCustomRateAccount,
+    #[msg("Custom rate account not initialized")]
+    CustomRateNotInitialized,
+    #[msg("Batch size too large")]
+    BatchTooLarge,
 }
