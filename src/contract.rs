@@ -180,6 +180,7 @@ pub struct SetCustomRate<'info> {
         bump
     )]
     pub custom_rate: Account<'info, CustomConversionRate>,
+    /// CHECK: 这是要设置专属兑换比例的用户账户
     pub user_account: AccountInfo<'info>,
     #[account(mut)]
     pub authority: Signer<'info>,
@@ -210,6 +211,7 @@ pub struct ConvertPoints<'info> {
     pub token_account: Account<'info, TokenAccount>,
     #[account(mut)]
     pub user_points: Account<'info, UserPoints>,
+    /// 用户的专属兑换比例账户（可选）
     #[account(
         mut,
         seeds = [b"custom_rate", user_points.owner.as_ref()],
