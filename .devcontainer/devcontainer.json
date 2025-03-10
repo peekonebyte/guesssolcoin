@@ -5,7 +5,10 @@
 	"workspaceFolder": "/workspaces/${localWorkspaceFolderBasename}",
     "build": {
         "dockerfile": "Dockerfile",
-        "context": ".."
+        "context": "..",
+		"args": {
+			"tag": "solana-dev-container:latest"
+		}
     }
 
 	// Features to add to the dev container. More info: https://containers.dev/features.
